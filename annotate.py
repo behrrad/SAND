@@ -26,12 +26,12 @@ class Annotation():
         self.conn = None
         self.cursor = None
         self.wdc = 'dataset/wdc.txt'
-        self.dbname = 'relation.db'
+        self.dbname = 'relation_v2.db'
         # self.dbname = 'relation-dbpedia.db'
         self.getEntityQuery = 'https://www.wikidata.org/w/api.php?action=wbgetentities&format=json&ids=%s&languages=en'
         self.searchQuery = 'https://www.wikidata.org/w/api.php?action=wbsearchentities&format=json&search=%s&language=en'
 
-        self.k = 10
+        self.k = 3
 
         self.ineligible = 1
         self.wikimapper = WikiMapper("index_enwiki-latest.db")
@@ -466,6 +466,20 @@ class Annotation():
                 new_data.append(datacolumn[i])
         return new_data
 
+    def update_topk(self, topK, type_property_unit, cost):
+        for i in range(len(topK)):
+            if topK[i][0] == np.inf:
+                break
+            if topK[i][1][0] == type_property_unit[0] and topK[i][1][1] == type_property_unit[1]:
+                if topK[i][0] > cost:
+                    topK[i] = (cost, type_property_unit, )
+                    topK.sort(key=lambda x: x[0])
+                return topK
+        topK[-1] = (cost, type_property_unit,)
+        topK.sort(key=lambda x: x[0])
+        return topK
+
+
     def predict(self, eType, values, distributions, dtype='int'):
         # retrieve labels by mapping function
         # set the threshold for min-cost
@@ -535,6 +549,7 @@ class Annotation():
                 # update top k
                 # new code
                 if cost < topK[-1][0]:
+                    # topK = self.update_topk(topK, data[1], cost)
                     topK[-1] = (cost, data[1],)
                     topK.sort(key=lambda x: x[0])
 
@@ -547,9 +562,9 @@ class Annotation():
         #     predictions.append(x)
         for x in topK:
             # COMMENT
-            # result = self.resolveTriple(x[1])
+            result = self.resolveTriple(x[1])
             # COMMENT END
-            result = x[1]
+            # result = x[1]
             if result == None:
                 continue
             elif len(result) < 3:
@@ -626,7 +641,7 @@ class Annotation():
         tdv_v4 = "dataset/T2Dv2_v4.txt"
         with open('./typeHierarchy.pickle', 'rb') as f:
             hierarchy_graph = pickle.load(f)
-        with open(tdv_v4, 'r') as tbf:
+        with open(wikitable, 'r') as tbf:
             i = -1
             # for i in range(110): line = tbf.readline().strip()
             line = tbf.readline().strip()
@@ -1399,8 +1414,11 @@ if __name__ == '__main__':
     # t.processTable(dataset="wdc")
     # t.verify()
     a = Annotation()
-    # a.annotate()
-    a.annotate_dbpedia()
+    start = time.time()
+    a.annotate()
+    end = time.time()
+    print(end - start)
+    # a.annotate_dbpedia()
     # a.testefficiency()
     # a.testReduction()
     # a.testReduction2()
