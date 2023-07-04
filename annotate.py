@@ -470,7 +470,7 @@ class Annotation():
         for i in range(len(topK)):
             if topK[i][0] == np.inf:
                 break
-            if topK[i][1][0] == type_property_unit[0] and topK[i][1][1] == type_property_unit[1]:
+            if topK[i][1][1] == type_property_unit[1]:
                 if topK[i][0] > cost:
                     topK[i] = (cost, type_property_unit, )
                     topK.sort(key=lambda x: x[0])
@@ -549,9 +549,7 @@ class Annotation():
                 # update top k
                 # new code
                 if cost < topK[-1][0]:
-                    # topK = self.update_topk(topK, data[1], cost)
-                    topK[-1] = (cost, data[1],)
-                    topK.sort(key=lambda x: x[0])
+                    topK = self.update_topk(topK, data[1], cost)
 
         # no matched columns within the given threshold. reject this column
         # if len(topK) == 0:
@@ -708,7 +706,7 @@ class Annotation():
                     continue
                     '''
                     # print(eType, values, i)
-                    eType = self.get_parents_to_the_root(hierarchy_graph, eType)
+                    # eType = self.get_parents_to_the_root(hierarchy_graph, eType)
                     distributions = self.getDistribution(eType)
                     if len(distributions) == 0:
                         line = tbf.readline().strip()
@@ -1413,6 +1411,7 @@ if __name__ == '__main__':
     # t.processTable()
     # t.processTable(dataset="wdc")
     # t.verify()
+    print("v2 + bi parent")
     a = Annotation()
     start = time.time()
     a.annotate()
