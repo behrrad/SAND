@@ -620,6 +620,49 @@ class Annotation():
             row = self.cursor.fetchone()
         return rv
 
+    def update_distribution_using_average(self, distributions, values):
+        avg_values = sum(values) / len(values)
+        properties_dict = {}
+        final_distribution = {}
+        for key in distributions:
+            avg = sum(distributions[key]) / len(distributions[key]) if len(distributions[key]) else None
+            if key[1] not in properties_dict and avg:
+                properties_dict[key[1]] = []
+            if avg:
+                properties_dict[key[1]].append((key, avg))
+        for key in properties_dict:
+            min_dif = abs(properties_dict[key][0][1] - avg_values)
+            min_tpu = properties_dict[key][0][0]
+            for tpu in properties_dict[key]:
+                if abs(tpu[1] - avg_values) < min_dif:
+                    min_dif = abs(tpu[1] - avg_values)
+                    min_tpu = tpu[0]
+            final_distribution[min_tpu] = distributions[min_tpu]
+        return final_distribution
+
+    def update_distribution_using_ks_test(self, distributions, values):
+        properties_dict = {}
+        final_distribution = {}
+        for key in distributions:
+            if len(distributions[key]) == 0:
+                continue
+            similarity, _ = ks_2samp(distributions[key], values)
+            if key[1] not in properties_dict and similarity:
+                properties_dict[key[1]] = []
+            if similarity:
+                properties_dict[key[1]].append((key, similarity))
+        print(properties_dict)
+        for key in properties_dict:
+            max_similarity = properties_dict[key][0][1]
+            max_tpu = properties_dict[key][0][0]
+            for tpu in properties_dict[key]:
+                if tpu[1] > max_similarity:
+                    max_similarity = tpu[1]
+                    max_tpu = tpu[0]
+            final_distribution[max_tpu] = distributions[max_tpu]
+        return final_distribution
+
+
     def annotate(self):
         self.connect()
         signal.signal(signal.SIGALRM, TimeoutHandler)
@@ -736,6 +779,8 @@ class Annotation():
                     v = sorted(values, reverse=True)
                     if sum(values[1:]) == v[0]: values.remove(v[0])
 
+                    distributions = self.update_distribution_using_ks_test(distributions, values)
+                    return
                     predictions = self.predict(eType, values, distributions, dtype)
                     print("semantic: ", semantic)
                     print("prediction: ", predictions)
@@ -1411,7 +1456,7 @@ if __name__ == '__main__':
     # t.processTable()
     # t.processTable(dataset="wdc")
     # t.verify()
-    print("v2 + bi parent")
+    print("v2 + bi parent + statistics")
     a = Annotation()
     start = time.time()
     a.annotate()
