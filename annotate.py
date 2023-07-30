@@ -26,12 +26,12 @@ class Annotation():
         self.conn = None
         self.cursor = None
         self.wdc = 'dataset/wdc.txt'
-        self.dbname = 'relation_v2.db'
+        self.dbname = 'relation.db'
         # self.dbname = 'relation-dbpedia.db'
         self.getEntityQuery = 'https://www.wikidata.org/w/api.php?action=wbgetentities&format=json&ids=%s&languages=en'
         self.searchQuery = 'https://www.wikidata.org/w/api.php?action=wbsearchentities&format=json&search=%s&language=en'
 
-        self.k = 3
+        self.k = 10
 
         self.ineligible = 1
         self.wikimapper = WikiMapper("index_enwiki-latest.db")
@@ -112,7 +112,10 @@ class Annotation():
             # if len(query) > len(column): continue
             cost = self.estimateByRange(query, column)
 
-            heapq.heappush(queue, (cost, key,))
+            try:
+                heapq.heappush(queue, (cost, key,))
+            except:
+                continue
         return queue, topK
 
     def estimateByRange(self, query, data):
@@ -472,13 +475,113 @@ class Annotation():
                 break
             if topK[i][1][1] == type_property_unit[1]:
                 if topK[i][0] > cost:
-                    topK[i] = (cost, type_property_unit, )
+                    topK[i] = (cost, type_property_unit,)
                     topK.sort(key=lambda x: x[0])
                 return topK
         topK[-1] = (cost, type_property_unit,)
         topK.sort(key=lambda x: x[0])
         return topK
 
+    def predict_without_order(self, eType, values, distributions, dtype='int'):
+        # retrieve labels by mapping function
+        # set the threshold for min-cost
+        thres = abs(0.3 * sum(values))
+        isPattern = False
+        # check pre-defined patterns
+        if dtype == 'int':
+            (isPattern, l) = self.patternMatching(values)
+
+        # TODO: REMOVE PATTERN MATCHING FOR TESTING PURPOSE
+        isPattern = False
+
+        allcolumns = distributions.items()
+
+        # pruning
+        queue, topK = self.createOrder(values, allcolumns)
+        # numCols = len(queue)
+
+        pruned1, pruned2 = 0, 0
+        i = 0
+        while i < len(list(distributions.keys())):
+            # new code
+            dict_key = list(distributions.keys())[i]
+            datacolumn = distributions[dict_key]
+            i += 1
+            currentMax = topK[-1][0]
+            # new code
+            datacolumn = self.remove_outliers(datacolumn)
+            est = self.pruneUp(values, datacolumn, topK)
+            if est > currentMax or est == -1:
+                # new code
+                pruned1 += 1
+
+            elif self.pruneDown(values, datacolumn, topK) > currentMax:
+                # new code
+                pruned2 += 1
+
+            else:
+                try:
+                    if len(values) < 51:
+                        # NEW CODE
+                        if len(values) > len(datacolumn):
+                            np.random.shuffle(values)
+                            cost = self.computeCost(values[:len(datacolumn)], datacolumn)
+                            cost = cost * len(values) / len(datacolumn)
+                        else:
+                            cost = self.computeCost(values, datacolumn)
+                    else:
+                        sumcost = 0
+                        # numsubsets = int(math.log(len(values)/50)) + 1
+                        numsubsets = 1
+                        for s in range(numsubsets):
+                            np.random.shuffle(values)
+                            # NEW CODE
+                            if len(values) > len(datacolumn):
+                                np.random.shuffle(values)
+                                cost = self.computeCost(values[:min(len(datacolumn), 50)], datacolumn)
+                                cost = cost * 50 / len(datacolumn)
+                            else:
+                                cost = self.computeCost(values[:50], datacolumn)
+                            sumcost += cost
+                        avgcost = sumcost / numsubsets
+                        cost = avgcost  # * len(values)/50
+
+                    # if cost > thres: continue
+
+                except TimeoutError:
+                    return None
+                # update top k
+                # new code
+                if cost < topK[-1][0]:
+                    topK = self.update_topk(topK, dict_key, cost)
+
+        # no matched columns within the given threshold. reject this column
+        # if len(topK) == 0:
+        #    return None
+        return topK[0][1]
+        predictions = []
+        # for x in topK:
+        #     predictions.append(x)
+        for x in topK:
+            # COMMENT
+            result = self.resolveTriple(x[1])
+            # COMMENT END
+            # result = x[1]
+            if result == None:
+                continue
+            elif len(result) < 3:
+                continue
+
+            predictions.append(list((result, x[0])))
+
+        # if a pattern is detected, add label to return list
+        if isPattern:
+            if len(predictions) != 0:
+                predictions[-1] = ('t', l, None)
+            else:
+                predictions.append(('t', l, None))
+
+        return predictions
 
     def predict(self, eType, values, distributions, dtype='int'):
         # retrieve labels by mapping function
@@ -521,8 +624,9 @@ class Annotation():
                         # NEW CODE
                         if len(values) > len(datacolumn):
                             np.random.shuffle(values)
-                            cost = self.computeCost(values[:len(datacolumn)], datacolumn)
-                            cost = cost * len(values) / len(datacolumn)
+                            number_of_rows_to_check = max(len(datacolumn), min(len(datacolumn), 10))
+                            cost = self.computeCost(values[:number_of_rows_to_check], datacolumn)
+                            cost = cost * len(values) / number_of_rows_to_check
                         else:
                             cost = self.computeCost(values, datacolumn)
                     else:
@@ -533,9 +637,10 @@ class Annotation():
                             np.random.shuffle(values)
                             # NEW CODE
                             if len(values) > len(datacolumn):
+                                number_of_rows_to_check = min(max(len(datacolumn), min(len(datacolumn), 10)), 50)
                                 np.random.shuffle(values)
-                                cost = self.computeCost(values[:min(len(datacolumn), 50)], datacolumn)
-                                cost = cost * 50 / len(datacolumn)
+                                cost = self.computeCost(values[:number_of_rows_to_check], datacolumn)
+                                cost = cost * 50 / number_of_rows_to_check
                             else:
                                 cost = self.computeCost(values[:50], datacolumn)
                             sumcost += cost
@@ -620,27 +725,205 @@ class Annotation():
             row = self.cursor.fetchone()
         return rv
 
-    def update_distribution_using_average(self, distributions, values):
+    def update_distribution_using_average_v1(self, distributions, values):
+        with open("conversion_rates_v2.json", "r") as f:
+            conversion_rates = json.load(f)
+        with open("id_to_label_mapping.json", "r") as f:
+            id_to_label_mapping = json.load(f)
+        with open("label_to_id_mapping.json", "r") as f:
+            label_to_id_mapping = json.load(f)
         avg_values = sum(values) / len(values)
         properties_dict = {}
         final_distribution = {}
         for key in distributions:
-            avg = sum(distributions[key]) / len(distributions[key]) if len(distributions[key]) else None
-            if key[1] not in properties_dict and avg:
+            # INJA BIA
+            distributions[key] = self.remove_outliers(distributions[key])
+            if len(distributions[key]) < 3:
+                continue
+            avg = sum(distributions[key]) / len(distributions[key])
+            if key[1] not in properties_dict:
                 properties_dict[key[1]] = []
-            if avg:
-                properties_dict[key[1]].append((key, avg))
+            properties_dict[key[1]].append((key, avg))
+
+            if key[2] not in id_to_label_mapping:
+                continue
+            unit = id_to_label_mapping[key[2]]
+            if unit not in conversion_rates:
+                continue
+            for new_unit in conversion_rates[unit]:
+                new_avg = avg * conversion_rates[unit][new_unit]
+                new_unit_id = label_to_id_mapping[new_unit] if new_unit in label_to_id_mapping else 1
+                properties_dict[key[1]].append(
+                    ((key[0], key[1], new_unit_id), new_avg, key, conversion_rates[unit][new_unit]))
+
         for key in properties_dict:
             min_dif = abs(properties_dict[key][0][1] - avg_values)
-            min_tpu = properties_dict[key][0][0]
+            min_tpu = properties_dict[key][0]
             for tpu in properties_dict[key]:
                 if abs(tpu[1] - avg_values) < min_dif:
                     min_dif = abs(tpu[1] - avg_values)
-                    min_tpu = tpu[0]
-            final_distribution[min_tpu] = distributions[min_tpu]
+                    min_tpu = tpu
+            if min_tpu[0] in distributions:
+                final_distribution[min_tpu[0]] = distributions[min_tpu[0]]
+            else:
+                final_distribution[min_tpu[0]] = [i * min_tpu[3] for i in distributions[min_tpu[2]]]
         return final_distribution
 
-    def update_distribution_using_ks_test(self, distributions, values):
+    def update_distribution_using_median_v1(self, distributions, values):
+        with open("conversion_rates_v2.json", "r") as f:
+            conversion_rates = json.load(f)
+        with open("id_to_label_mapping.json", "r") as f:
+            id_to_label_mapping = json.load(f)
+        with open("label_to_id_mapping.json", "r") as f:
+            label_to_id_mapping = json.load(f)
+        mean_values = values[int(len(values) / 2)]
+        properties_dict = {}
+        final_distribution = {}
+        for key in distributions:
+            # INJA BIA
+            distributions[key] = self.remove_outliers(distributions[key])
+            if len(distributions[key]) < 3:
+                continue
+            mean = distributions[key][int(len(distributions[key]) / 2)]
+            if key[1] not in properties_dict:
+                properties_dict[key[1]] = []
+            properties_dict[key[1]].append((key, mean))
+
+            if key[2] not in id_to_label_mapping:
+                continue
+            unit = id_to_label_mapping[key[2]]
+            if unit not in conversion_rates:
+                continue
+            for new_unit in conversion_rates[unit]:
+                new_mean = mean * conversion_rates[unit][new_unit]
+                new_unit_id = label_to_id_mapping[new_unit] if new_unit in label_to_id_mapping else 1
+                properties_dict[key[1]].append(
+                    ((key[0], key[1], new_unit_id), new_mean, key, conversion_rates[unit][new_unit]))
+
+        for key in properties_dict:
+            min_dif = abs(properties_dict[key][0][1] - mean_values)
+            min_tpu = properties_dict[key][0]
+            for tpu in properties_dict[key]:
+                if abs(tpu[1] - mean_values) < min_dif:
+                    min_dif = abs(tpu[1] - mean_values)
+                    min_tpu = tpu
+            if min_tpu[0] in distributions:
+                final_distribution[min_tpu[0]] = distributions[min_tpu[0]]
+            else:
+                final_distribution[min_tpu[0]] = [i * min_tpu[3] for i in distributions[min_tpu[2]]]
+        return final_distribution
+
+    def get_average_of_second_and_third_quarter(self, data):
+        num = 0
+        sum = 0
+        for i in range(int(len(data) / 4), 3 * int(len(data) / 4)):
+            num += 1
+            sum += data[i]
+        return sum / num
+
+    def update_distribution_using_average_of_second_and_third_quarter_v1(self, distributions, values):
+        if len(values) < 4:
+            return self.update_distribution_using_median_v1(distributions, values)
+        with open("conversion_rates_v2.json", "r") as f:
+            conversion_rates = json.load(f)
+        with open("id_to_label_mapping.json", "r") as f:
+            id_to_label_mapping = json.load(f)
+        with open("label_to_id_mapping.json", "r") as f:
+            label_to_id_mapping = json.load(f)
+        avg_values = self.get_average_of_second_and_third_quarter(values)
+        properties_dict = {}
+        final_distribution = {}
+        for key in distributions:
+            distributions[key] = self.remove_outliers(distributions[key])
+            if len(distributions[key]) < 4:
+                continue
+            avg = self.get_average_of_second_and_third_quarter(distributions[key])
+            if key[1] not in properties_dict:
+                properties_dict[key[1]] = []
+            properties_dict[key[1]].append((key, avg))
+
+            if key[2] not in id_to_label_mapping:
+                continue
+            unit = id_to_label_mapping[key[2]]
+            if unit not in conversion_rates:
+                continue
+            for new_unit in conversion_rates[unit]:
+                new_avg = avg * conversion_rates[unit][new_unit]
+                new_unit_id = label_to_id_mapping[new_unit] if new_unit in label_to_id_mapping else 1
+                properties_dict[key[1]].append(
+                    ((key[0], key[1], new_unit_id), new_avg, key, conversion_rates[unit][new_unit]))
+
+        for key in properties_dict:
+            min_dif = abs(properties_dict[key][0][1] - avg_values) #* (max(properties_dict[key][0][1], avg_values) / min(properties_dict[key][0][1], avg_values))
+            min_tpu = properties_dict[key][0]
+            for tpu in properties_dict[key]:
+                distance = abs(tpu[1] - avg_values) #* (max(tpu[1], avg_values) / min(tpu[1], avg_values))
+                if distance < min_dif:
+                    min_dif = abs(tpu[1] - avg_values) #* (max(tpu[1], avg_values) / min(tpu[1], avg_values))
+                    min_tpu = tpu
+            if min_tpu[0] in distributions:
+                final_distribution[min_tpu[0]] = distributions[min_tpu[0]]
+            else:
+                final_distribution[min_tpu[0]] = [i * min_tpu[3] for i in distributions[min_tpu[2]]]
+        return final_distribution
+
+    def update_distribution_using_SAND(self, distributions, values, dtype):
+        with open("conversion_rates_v2.json", "r") as f:
+            conversion_rates = json.load(f)
+        with open("id_to_label_mapping.json", "r") as f:
+            id_to_label_mapping = json.load(f)
+        with open("label_to_id_mapping.json", "r") as f:
+            label_to_id_mapping = json.load(f)
+        new_dict = {}
+        for key in distributions.keys():
+            distributions[key] = self.remove_outliers(distributions[key])
+            if len(distributions[key]) < 4:
+                continue
+            if key[1] not in new_dict:
+                new_dict[key[1]] = {}
+            new_dict[key[1]][key] = distributions[key]
+
+            if key[2] not in id_to_label_mapping:
+                continue
+            unit = id_to_label_mapping[key[2]]
+            if unit not in conversion_rates:
+                continue
+            for new_unit in conversion_rates[unit]:
+                cr = conversion_rates[unit][new_unit]
+                new_unit_id = label_to_id_mapping[new_unit] if new_unit in label_to_id_mapping else 1
+                if (key[0], key[1], new_unit_id) not in new_dict[key[1]]:
+                    new_dict[key[1]][(key[0], key[1], new_unit_id)] = [i * cr for i in distributions[key]]
+                else:
+                    new_dict[key[1]][(key[0], key[1], new_unit_id)].extend([i * cr for i in distributions[key]])
+        predicted = []
+        for dic in new_dict:
+            p = self.predict_without_order('', values, new_dict[dic], dtype)
+            if p:
+                predicted.append((p, new_dict[dic][p]))
+        return predicted
+
+    def update_distribution_using_average_v2(self, distributions, values):
+        avg_values = sum(values) / len(values)
+        properties_dict = {}
+        final_distribution = {}
+        for key in distributions:
+            if len(distributions[key]) < 3:
+                continue
+            avg = sum(distributions[key]) / len(distributions[key])
+            if key[1] not in properties_dict:
+                properties_dict[key[1]] = []
+            properties_dict[key[1]].append((key, avg))
+        for key in properties_dict:
+            min_dif = abs(properties_dict[key][0][1] - avg_values)
+            min_tpu = properties_dict[key][0]
+            for tpu in properties_dict[key]:
+                if abs(tpu[1] - avg_values) < min_dif:
+                    min_dif = abs(tpu[1] - avg_values)
+                    min_tpu = tpu
+            final_distribution[min_tpu[0]] = distributions[min_tpu[0]]
+        return final_distribution
+
+    def update_distribution_using_ks_test_v2(self, distributions, values):
         properties_dict = {}
         final_distribution = {}
         for key in distributions:
@@ -662,7 +945,6 @@ class Annotation():
             final_distribution[max_tpu] = distributions[max_tpu]
         return final_distribution
 
-
     def annotate(self):
         self.connect()
         signal.signal(signal.SIGALRM, TimeoutHandler)
@@ -676,12 +958,12 @@ class Annotation():
         short = open('result_short.txt', 'w')
         # ent = open('typeDetectWDC.txt', 'w')
         eTypePred = 0
-        wikitable = "dataset/wiki_annotated.txt"
+        wikitable = "dataset/wiki_annotated3.txt"
         wdc = "dataset/wdc_annotated.txt"
         tdv = "dataset/T2Dv2_v2.txt"
         tdv_v4 = "dataset/T2Dv2_v4.txt"
-        with open('./typeHierarchy.pickle', 'rb') as f:
-            hierarchy_graph = pickle.load(f)
+        # with open('./typeHierarchy.pickle', 'rb') as f:
+        #     hierarchy_graph = pickle.load(f)
         with open(wikitable, 'r') as tbf:
             i = -1
             # for i in range(110): line = tbf.readline().strip()
@@ -779,11 +1061,36 @@ class Annotation():
                     v = sorted(values, reverse=True)
                     if sum(values[1:]) == v[0]: values.remove(v[0])
 
-                    distributions = self.update_distribution_using_ks_test(distributions, values)
-                    return
+                    # check kardane sand va avg
+                    # d2 = self.update_distribution_using_average_of_second_and_third_quarter_v1(distributions, values)
+                    # distributions = self.update_distribution_using_SAND(distributions, values, dtype)
+                    # print(len(distributions))
+                    # for key in distributions:
+                    #     if key[0] not in d2:
+                    #         print("*** SAND")
+                    #         print(key[0])
+                    #         for d in d2:
+                    #             if d[1] == key[0][1]:
+                    #                 print("Avg")
+                    #                 print(d)
+                    #                 print("distribution e avg")
+                    #                 print(d2[d])
+                    #                 print(len(d2[d]))
+                    #         print("distribution e sand")
+                    #         print(key[1])
+                    #         print(len(key[1]))
+                    #         print(values)
+                    # line = tbf.readline().strip()
+                    # continue
+                    distributions = self.update_distribution_using_average_of_second_and_third_quarter_v1(distributions,
+                                                                                                          values)
+                    print(distributions)
+                    for key in distributions:
+                        print(key[1])
                     predictions = self.predict(eType, values, distributions, dtype)
                     print("semantic: ", semantic)
                     print("prediction: ", predictions)
+                    return
                     # line = tbf.readline().strip()
                     # continue
                     # predictions = self.ksdistance(eType, values, distributions, dtype)
@@ -1026,7 +1333,7 @@ class Annotation():
                 nodenum = j + len(arr1)
                 # may have different distance functions
                 distance = abs(arr2[j] - arr1[i])
-
+                distance = distance * int(max(arr2[j], arr1[i]) / max(1, min(arr2[j], arr1[i])))
                 G.add_edge(i, nodenum, capacity=1, weight=distance)
 
         # connect all data nodes to sink. cost of edges are 0
@@ -1088,7 +1395,7 @@ class Annotation():
         for key in distributions:
             values = distributions[key]
             (statistic, pvalue) = mannwhitneyu(column, values, alternative="two-sided")
-        
+
             if pvalue > alpha:
                 labels.append(key)
         '''
@@ -1157,7 +1464,7 @@ class Annotation():
 
     def getEntityType(self, entities):
         '''
-        return value: 
+        return value:
             a set containing matched entity types
             The types are represented by wikiID.
         '''
@@ -1456,7 +1763,7 @@ if __name__ == '__main__':
     # t.processTable()
     # t.processTable(dataset="wdc")
     # t.verify()
-    print("v2 + bi parent + statistics")
+    print("v2 + bi parent")
     a = Annotation()
     start = time.time()
     a.annotate()
@@ -1478,12 +1785,12 @@ if __name__ == '__main__':
     for qnode in flow:
         if qnode == 's' or qnode == 't':
             continue
-        
+
         for dnode in flow[qnode]:
             if flow[qnode][dnode] == 1:
                 dnodeIdx = dnode - len(arr1)
                 mset.add(arr2[dnodeIdx])
-    
+
     for value in mset:
         arr2.remove(value)
     '''
