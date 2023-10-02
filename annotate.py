@@ -6,8 +6,11 @@ import numpy as np
 import heapq
 import time
 from scipy.stats import ttest_ind, mannwhitneyu, ks_2samp, zscore
+import statistics
 from wikimapper import WikiMapper
 from get_dbpedia_data import get_features_and_kinds_multi_thread
+
+from generate_new_columns import k_means_clustering
 
 
 class TimeoutError(Exception):
@@ -31,7 +34,7 @@ class Annotation():
         self.getEntityQuery = 'https://www.wikidata.org/w/api.php?action=wbgetentities&format=json&ids=%s&languages=en'
         self.searchQuery = 'https://www.wikidata.org/w/api.php?action=wbsearchentities&format=json&search=%s&language=en'
 
-        self.k = 10
+        self.k = 3
 
         self.ineligible = 1
         self.wikimapper = WikiMapper("index_enwiki-latest.db")
@@ -821,6 +824,36 @@ class Annotation():
             sum += data[i]
         return sum / num
 
+    def number_of_common_member(self, a, b):
+        result = [i for i in a if i in b]
+        return len(result)
+
+    def add_new_data_to_column(self, distributions, key, id_to_label_mapping, conversion_rates):
+        column = distributions[key]
+        if len(column) == 0:
+            return column
+        if key[2] not in id_to_label_mapping:
+            return column
+        unit = id_to_label_mapping[key[2]]
+        if unit not in conversion_rates:
+            return column
+        for key2 in distributions:
+            if len(distributions[key2]) == 0 or key2[0] != key[0] or key2[1] != key[1] or key2[2] == key[2]:
+                continue
+            if key2[2] not in id_to_label_mapping:
+                continue
+
+            unit2 = id_to_label_mapping[key2[2]]
+            if unit not in conversion_rates[unit2]:
+                continue
+            conversion_rate = conversion_rates[unit2][unit]
+            new_data = [i * conversion_rate for i in distributions[key2]]
+            common_members = self.number_of_common_member(column, new_data)
+            coverage = common_members / min(len(column), len(new_data))
+            if coverage < 0.5:
+                column.extend(new_data)
+        return column
+
     def update_distribution_using_average_of_second_and_third_quarter_v1(self, distributions, values):
         if len(values) < 4:
             return self.update_distribution_using_median_v1(distributions, values)
@@ -837,7 +870,9 @@ class Annotation():
             distributions[key] = self.remove_outliers(distributions[key])
             if len(distributions[key]) < 4:
                 continue
-            avg = self.get_average_of_second_and_third_quarter(distributions[key])
+            # column_values = self.add_new_data_to_column(distributions, key, id_to_label_mapping, conversion_rates)
+            column_values = distributions[key]
+            avg = self.get_average_of_second_and_third_quarter(column_values)
             if key[1] not in properties_dict:
                 properties_dict[key[1]] = []
             properties_dict[key[1]].append((key, avg))
@@ -854,12 +889,12 @@ class Annotation():
                     ((key[0], key[1], new_unit_id), new_avg, key, conversion_rates[unit][new_unit]))
 
         for key in properties_dict:
-            min_dif = abs(properties_dict[key][0][1] - avg_values) #* (max(properties_dict[key][0][1], avg_values) / min(properties_dict[key][0][1], avg_values))
+            min_dif = abs(properties_dict[key][0][1] - avg_values) / max(properties_dict[key][0][1], avg_values, 1) # * (max(properties_dict[key][0][1], avg_values) / min(properties_dict[key][0][1], avg_values))
             min_tpu = properties_dict[key][0]
             for tpu in properties_dict[key]:
-                distance = abs(tpu[1] - avg_values) #* (max(tpu[1], avg_values) / min(tpu[1], avg_values))
+                distance = abs(tpu[1] - avg_values) / max(tpu[1], avg_values, 1)  # * (max(tpu[1], avg_values) / min(tpu[1], avg_values))
                 if distance < min_dif:
-                    min_dif = abs(tpu[1] - avg_values) #* (max(tpu[1], avg_values) / min(tpu[1], avg_values))
+                    min_dif = abs(tpu[1] - avg_values) / max(tpu[1], avg_values, 1)  # * (max(tpu[1], avg_values) / min(tpu[1], avg_values))
                     min_tpu = tpu
             if min_tpu[0] in distributions:
                 final_distribution[min_tpu[0]] = distributions[min_tpu[0]]
@@ -945,6 +980,106 @@ class Annotation():
             final_distribution[max_tpu] = distributions[max_tpu]
         return final_distribution
 
+    def divide_column(self, values):
+        values = self.remove_outliers(values)
+        values.sort()
+        new_data = [[]]
+        for d in values:
+            if len(new_data[-1]) > 0:
+                if new_data[-1][-1] * 3 < d:
+                    new_data.append([])
+            new_data[-1].append(d)
+            new_data[-1].sort()
+        list_of_new_columns = []
+        for d in new_data:
+            if len(d) < 4:
+                continue
+            new_d = [x for x in d]
+            list_of_new_columns.append(new_d)
+        return list_of_new_columns
+
+    def divide_column_using_std_dev(self, values):
+        values = self.remove_outliers(values)
+        values.sort()
+        new_data = [[]]
+        for v in values:
+            if len(new_data[-1]) < 3:
+                new_data[-1].append(v)
+                continue
+            test_data = []
+            test_data.extend(new_data[-1])
+            test_data.append(v)
+            std_dev = statistics.stdev(test_data)
+            mean = sum(test_data) / len(test_data)
+            if std_dev == 0 or (abs(v - mean) / std_dev) > 3 or 3 * new_data[-1][-1] < v:
+                new_data[-1] = self.remove_outliers(new_data[-1])
+                new_data.append([v])
+            else:
+                new_data[-1].append(v)
+        new_data[-1] = self.remove_outliers(new_data[-1])
+        list_of_new_columns = []
+        for d in new_data:
+            if len(d) < 4:
+                continue
+            new_d = [x for x in d]
+            list_of_new_columns.append(new_d)
+        return list_of_new_columns
+
+    def update_predictions_old_method(self, predictions):
+        new_predictions = []
+        for prediction in predictions:
+            new_predictions.extend(prediction)
+        new_predictions.sort(key=lambda x: x[1])
+        return new_predictions[:self.k]
+
+    def check_property_presence_in_prediction(self, prop, predictions):
+        for pred in predictions:
+            if prop == pred[0][1]:
+                return True
+        return False
+
+    def update_predictions(self, predictions):
+        new_predictions = []
+        for i in range(len(predictions)):
+            for pred in predictions[i]:
+                if self.check_property_presence_in_prediction(pred[0][1], new_predictions):
+                    continue
+                cost = pred[1]
+                for j in range(len(predictions)):
+                    if i == j:
+                        continue
+                    max_cost = 0
+                    for pred2 in predictions[j]:
+                        if pred2[0][1] == pred[0][1]:
+                            max_cost = pred2[1]
+                            break
+                        if max_cost < pred2[1]:
+                            max_cost = pred2[1]
+                    cost += max_cost
+                pred[1] = cost
+                new_predictions.append(pred)
+
+        new_predictions.sort(key=lambda x: x[1])
+        print(len(new_predictions))
+        return new_predictions[:self.k]
+
+    def predict_divided_columns(self, eType, list_of_columns, distributions, dtype):
+        self.k = self.k + 5
+        predictions = []
+        max_cost = 0
+        for values in list_of_columns:
+            prediction = self.predict(eType, values, distributions, dtype)
+            for pred in prediction:
+                if pred[1] > max_cost:
+                    max_cost = pred[1]
+            predictions.append(prediction)
+        self.k = self.k - 5
+        return self.update_predictions_old_method(predictions)
+
+    def divide_and_predict_column(self, eType, values, distributions, dtype):
+        list_of_columns = self.divide_column_using_std_dev(values)
+        return self.predict_divided_columns(eType, list_of_columns, distributions, dtype)
+
     def annotate(self):
         self.connect()
         signal.signal(signal.SIGALRM, TimeoutHandler)
@@ -959,19 +1094,21 @@ class Annotation():
         # ent = open('typeDetectWDC.txt', 'w')
         eTypePred = 0
         wikitable = "dataset/wiki_annotated3.txt"
+        merged_units = "dataset/wiki_merged_units.txt"
         wdc = "dataset/wdc_annotated.txt"
         tdv = "dataset/T2Dv2_v2.txt"
         tdv_v4 = "dataset/T2Dv2_v4.txt"
         # with open('./typeHierarchy.pickle', 'rb') as f:
         #     hierarchy_graph = pickle.load(f)
-        with open(wikitable, 'r') as tbf:
+        khoroji_dorost = open("results-units/khoroji_dorost.txt", "a")
+        with open(merged_units, 'r') as tbf:
             i = -1
             # for i in range(110): line = tbf.readline().strip()
             line = tbf.readline().strip()
             x = 0
             try:
                 while line != '':
-                    print(correctLabel, correctUnit, total)
+                    # print(correctLabel, correctUnit, total)
                     i += 1
                     table = json.loads(line)
 
@@ -1082,15 +1219,14 @@ class Annotation():
                     #         print(values)
                     # line = tbf.readline().strip()
                     # continue
+                    # c1_values, c2_values = k_means_clustering(values)
                     distributions = self.update_distribution_using_average_of_second_and_third_quarter_v1(distributions,
                                                                                                           values)
-                    print(distributions)
-                    for key in distributions:
-                        print(key[1])
                     predictions = self.predict(eType, values, distributions, dtype)
-                    print("semantic: ", semantic)
-                    print("prediction: ", predictions)
-                    return
+                    # predictions = self.divide_and_predict_column(eType, values, distributions, dtype)
+                    # print("****")
+                    # print("semantic: ", semantic)
+                    # print("prediction: ", predictions)
                     # line = tbf.readline().strip()
                     # continue
                     # predictions = self.ksdistance(eType, values, distributions, dtype)
@@ -1104,6 +1240,10 @@ class Annotation():
                         line = tbf.readline().strip()
                         continue
 
+                    # # NEW CODE
+                    # for prediction in predictions:
+                    #     p_semantic = [x[0][1] for x in prediction]
+                    #     p_unit = [x[0][2] for x in prediction]
                     p_semantic = [x[0][1] for x in predictions]
                     p_unit = [x[0][2] for x in predictions]
 
@@ -1112,9 +1252,11 @@ class Annotation():
                     for p_sem in p_semantic:
                         if p_sem and (semantic in p_sem or p_sem in semantic):
                             correctLabel += 1
+                            print(line)
                             break
                         elif p_sem and 'number of' in p_sem and 'number of' in semantic:
                             correctLabel += 1
+                            print(line)
                             break
 
                     if unit in p_unit: correctUnit += 1
@@ -1202,6 +1344,8 @@ class Annotation():
                     if len(distributions) == 0:
                         line = tbf.readline().strip()
                         continue
+                    print(distributions)
+                    break
                     dtype = 'float'
                     # values = ';'.join(values).replace(',', '').split(';')
                     # NEW CODE
@@ -1306,6 +1450,16 @@ class Annotation():
         return propertyMatch, unitMatch
 
     def computeCost(self, arr1, arr2, dist='abs'):
+        # avg_arr1 = sum(arr1) / len(arr1)
+        # avg_arr2 = sum(arr2) / len(arr2)
+        # # variance_arr1 = sum([((x - avg_arr1) ** 2) for x in arr1]) / len(arr1)
+        # # variance_arr2 = sum([((x - avg_arr2) ** 2) for x in arr2]) / len(arr1)
+        # # std_v1 = variance_arr1 ** 0.5
+        # # std_v2 = variance_arr2 ** 0.5
+        # arr1_v2 = [x * avg_arr2 / avg_arr1 for x in arr1]
+        # # arr2_v2 = [(x - avg_arr2) / std_v2 for x in arr2]
+        # arr1 = arr1_v2
+        # # arr2 = arr2_v2
         # arr1 always have smaller size
         if len(arr1) > len(arr2): raise ValueError('size of query column is greater than data column')
 
@@ -1333,7 +1487,8 @@ class Annotation():
                 nodenum = j + len(arr1)
                 # may have different distance functions
                 distance = abs(arr2[j] - arr1[i])
-                distance = distance * int(max(arr2[j], arr1[i]) / max(1, min(arr2[j], arr1[i])))
+                distance = int(10000 * distance / max(1, arr2[j], arr1[i]))
+                # distance = distance * int(max(arr2[j], arr1[i]) / max(1, min(arr2[j], arr1[i])))
                 G.add_edge(i, nodenum, capacity=1, weight=distance)
 
         # connect all data nodes to sink. cost of edges are 0
@@ -1763,7 +1918,7 @@ if __name__ == '__main__':
     # t.processTable()
     # t.processTable(dataset="wdc")
     # t.verify()
-    print("v2 + bi parent")
+    print("SAND addi + wiki annotated3")
     a = Annotation()
     start = time.time()
     a.annotate()
